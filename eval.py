@@ -39,7 +39,7 @@ cell_types = ["A172", "BT474","BV2", "Huh7", "MCF7", "SHSY5Y", "SkBr3", "SKOV3"]
 
 for i in cell_types:
 
-    seg_x = os.path.join("/scratch/users/menayat/models/livecell-unet-predictions/segmentation/", i+"*")
+    seg_x = os.path.join("/scratch/users/menayat/models/livecell-unet-predictions/boundaries/", i+"*")
     n = 0
     dsl = []
     for pred_seg in glob.glob(seg_x):
