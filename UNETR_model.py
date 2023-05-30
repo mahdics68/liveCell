@@ -11,12 +11,14 @@
 
 from typing import Sequence, Tuple, Union
 
+import torch
 import torch.nn as nn
 
 from monai.networks.blocks.dynunet_block import UnetOutBlock
-from monai.networks.blocks.unetr_block import UnetrBasicBlock, UnetrPrUpBlock, UnetrUpBlock
+from monai.networks.blocks.unetr_block import UnetrBasicBlock, UnetrPrUpBlock
 from monai.networks.nets.vit import ViT
 from monai.utils import ensure_tuple_rep
+from monai.networks.blocks.dynunet_block import UnetBasicBlock, UnetResBlock, get_conv_layer
 
 
 class UNETR(nn.Module):
@@ -41,7 +43,7 @@ class UNETR(nn.Module):
         dropout_rate: float = 0.0,
         spatial_dims: int = 3,
         qkv_bias: bool = False,
-        patch_size = 16
+        patch_size: int = 16
     ) -> None:
         """
         Args:
@@ -83,7 +85,7 @@ class UNETR(nn.Module):
 
         self.num_layers = 12
         img_size = ensure_tuple_rep(img_size, spatial_dims)
-        self.patch_size = ensure_tuple_rep(patch_size, spatial_dims) ### changed from 16
+        self.patch_size = ensure_tuple_rep(patch_size, spatial_dims)
         self.feat_size = tuple(img_d // p_d for img_d, p_d in zip(img_size, self.patch_size))
         self.hidden_size = hidden_size
         self.classification = False
@@ -186,7 +188,6 @@ class UNETR(nn.Module):
         self.proj_axes = (0, spatial_dims + 1) + tuple(d + 1 for d in range(spatial_dims))
         self.proj_view_shape = list(self.feat_size) + [self.hidden_size]
 
-
     def proj_feat(self, x):
         new_view = [x.size(0)] + self.proj_view_shape
         x = x.view(new_view)
@@ -208,3 +209,82 @@ class UNETR(nn.Module):
         dec1 = self.decoder3(dec2, enc2)
         out = self.decoder2(dec1, enc1)
         return self.out(out)
+
+
+class UnetrUpBlock(nn.Module):
+    """
+    An upsampling module that can be used for UNETR: "Hatamizadeh et al.,
+    UNETR: Transformers for 3D Medical Image Segmentation <https://arxiv.org/abs/2103.10504>"
+    """
+
+    def __init__(
+        self,
+        spatial_dims: int,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: Union[Sequence[int], int],
+        upsample_kernel_size: Union[Sequence[int], int],
+        norm_name: Union[Tuple, str],
+        res_block: bool = False,
+    ) -> None:
+        """
+        Args:
+            spatial_dims: number of spatial dimensions.
+            in_channels: number of input channels.
+            out_channels: number of output channels.
+            kernel_size: convolution kernel size.
+            upsample_kernel_size: convolution kernel size for transposed convolution layers.
+            norm_name: feature normalization type and arguments.
+            res_block: bool argument to determine if residual block is used.
+
+        """
+
+        super().__init__()
+        upsample_stride = upsample_kernel_size
+
+        # we apply this layer to change the number of channels and upsample
+        self.transp_conv = get_conv_layer(
+            spatial_dims,
+            in_channels,
+            out_channels,
+            kernel_size=upsample_kernel_size,
+            stride=upsample_stride,
+            conv_only=True,
+            is_transposed=True,
+        )
+
+        # we apply this layer to only change the number of channels
+        self.normal_conv = nn.Conv2d(in_channels, out_channels, kernel_size=1) if spatial_dims == 2 else\
+            nn.Conv3d(in_channels, out_channels, kernel_size=1)
+
+        if res_block:
+            self.conv_block = UnetResBlock(
+                spatial_dims,
+                out_channels + out_channels,
+                out_channels,
+                kernel_size=kernel_size,
+                stride=1,
+                norm_name=norm_name,
+            )
+        else:
+            self.conv_block = UnetBasicBlock(  # type: ignore
+                spatial_dims,
+                out_channels + out_channels,
+                out_channels,
+                kernel_size=kernel_size,
+                stride=1,
+                norm_name=norm_name,
+            )
+        self.spatial_dims = spatial_dims
+
+    def forward(self, inp, skip):
+        # number of channels for skip should equals to out_channels
+
+        # only apply the transposed convs if the spatial shapes do not match
+        if inp.shape[-self.spatial_dims:] != skip.shape[-self.spatial_dims:]:
+            out = self.transp_conv(inp)
+        else:
+            out = self.normal_conv(inp)
+        out = torch.cat((out, skip), dim=1)
+        out = self.conv_block(out)
+        return out
